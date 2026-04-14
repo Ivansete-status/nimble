@@ -191,7 +191,11 @@ proc createDirD*(dir: string) =
 
 proc getDownloadDirName*(uri: string, verRange: VersionRange,
                          vcsRevision: Sha1Hash): string =
-  ## Creates a directory name based on the specified ``uri`` (url)
+  ## Creates a directory name based on the specified ``uri`` (url).
+  ## Full SHA1 hashes (40 hex chars) are truncated to 8 characters to keep
+  ## names short. Deeply-nested packages such as nim-lsquic (which bundles
+  ## the BoringSSL fuzz corpus) can otherwise push the Windows temp-directory
+  ## path beyond the MAX_PATH limit (260 characters).
   let puri = parseUri(uri)
   for i in puri.hostname:
     case i
@@ -208,11 +212,24 @@ proc getDownloadDirName*(uri: string, verRange: VersionRange,
   let verSimple = getSimpleString(verRange)
   if verSimple != "":
     result.add "_"
-    result.add verSimple
-  
+    # A verSpecial range pinned to a full commit hash (e.g. "#4fb03ee7...")
+    # produces a 40-char hex string. Truncate it to the conventional short
+    # form (8 chars) used by git log --abbrev-commit.
+    if verSimple.len == 40 and verSimple.allCharsInSet({'0'..'9', 'a'..'f'}):
+      result.add verSimple[0..7]
+    else:
+      result.add verSimple
+
   if vcsRevision != notSetSha1Hash:
-    result.add "_"
-    result.add $vcsRevision
+    # Use only the first 8 characters of the VCS revision hash.
+    # When the version range already encodes the same commit (e.g. a
+    # "#<full-hash>" special version), verSimple and vcsRevision are
+    # identical; appending the full hash again would double ~40 chars for
+    # no benefit. The short prefix is sufficient to distinguish temp dirs.
+    let shortRev = ($vcsRevision)[0..7]
+    if not result.endsWith("_" & shortRev):
+      result.add "_"
+      result.add shortRev
 
 proc incl*(s: var HashSet[string], v: seq[string] | HashSet[string]) =
   for i in v:
@@ -505,3 +522,30 @@ when isMainModule:
          "b12e18db49fc60df117e5d8a289c4c2050a272dd") ==
         ("package", newVersion(""),
          "b12e18db49fc60df117e5d8a289c4c2050a272dd".initSha1Hash)
+
+  suite "getDownloadDirName":
+    const hash = "4fb03ee7bfb39aecb3316889fdcb60bec3d0936f"
+    const url  = "https://github.com/vacp2p/nim-lsquic"
+
+    test "pinned to full commit hash: hash appears only once, truncated to 8 chars":
+      # verSpecial with a full SHA1 and a matching vcsRevision — the common
+      # case that previously produced a double 40-char hash in the dir name,
+      # blowing past the Windows MAX_PATH limit.
+      let name = getDownloadDirName(url, newVersion("#" & hash), hash.initSha1Hash)
+      check name == "githubcom_vacp2pnimlsquic_" & hash[0..7]
+
+    test "pinned to branch name: branch + short revision":
+      let name = getDownloadDirName(url, newVersion("#main"), hash.initSha1Hash)
+      check name == "githubcom_vacp2pnimlsquic_main_" & hash[0..7]
+
+    test "semver with vcs revision: version + short revision":
+      let name = getDownloadDirName(url, newVersion("0.1.0"), hash.initSha1Hash)
+      check name == "githubcom_vacp2pnimlsquic_0.1.0_" & hash[0..7]
+
+    test "no version, no revision":
+      let name = getDownloadDirName(url, newVersion(""), notSetSha1Hash)
+      check name == "githubcom_vacp2pnimlsquic"
+
+    test "result fits within 50 chars for a typical github package + hash":
+      let name = getDownloadDirName(url, newVersion("#" & hash), hash.initSha1Hash)
+      check name.len <= 50
