@@ -21,10 +21,29 @@ proc infoAboutActivation(nimDest, nimVersion: string) =
     display("Info", nimDest & "installed; activate with 'source nim-" & nimVersion & "activate.sh'")
 
 proc compileNim*(options: Options, nimDest: string, v: VersionRange) =
-  #Most of the time we dont need to recompile, if we can get the nim version from the binary . 
-  let nimCompVersion = getNimVersionFromBin(nimDest / "bin" / "nim".addFileExt(ExeExt))
+  # 1. If nim is already properly installed at nimDest, skip.
+  let nimBinPath = nimDest / "bin" / "nim".addFileExt(ExeExt)
+  let nimCompVersion = getNimVersionFromBin(nimBinPath)
   if nimCompVersion.isSome() and nimCompVersion.get.withinRange(v):
     return
+
+  # 2. If the system nim satisfies the version requirement, copy it to nimDest
+  # instead of bootstrapping from C sources.  Bootstrapping fails on Windows
+  # because Koch cannot replace bin/nim.exe while it is in use (OS file lock).
+  let systemNimExe = findExe("nim")
+  if systemNimExe != "":
+    let systemNimVersion = getNimVersionFromBin(systemNimExe)
+    if systemNimVersion.isSome() and systemNimVersion.get.withinRange(v):
+      display("Info:", "system Nim $1 satisfies $2; reusing it instead of bootstrapping" %
+              [$systemNimVersion.get, $v], priority = HighPriority)
+      createDir(nimDest / "bin")
+      copyFileWithPermissions(systemNimExe, nimBinPath)
+      let pathEntry = nimDest / "bin"
+      when defined(windows):
+        writeFile(nimDest / ActivationFile, BatchFile % pathEntry.replace('/', '\\'))
+      else:
+        writeFile(nimDest / ActivationFile, ShellFile % pathEntry)
+      return
 
   let keepCsources = true # SAT Solver uses a cache instead of a temp dir for downloads
   template exec(command: string) =
